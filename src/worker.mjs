@@ -50,8 +50,12 @@ const {
 	readConfiguration
 } = compilerCli;
 
+/* ANGULAR_CHECK_EXPLAIN=1 says why a project isn't checked the fast way. */
+const explain = (reason) => {
+	if (process.env.ANGULAR_CHECK_EXPLAIN) console.error(`angular-check: ${reason}`);
+};
 const unsupported = (reason) => {
-	console.error(`angular-check: ${reason}`);
+	explain(reason);
 	process.exit(UNSUPPORTED);
 };
 if (!NgtscProgram || !readConfiguration || !defaultGatherDiagnostics || !formatDiagnostics || !exitCodeFromResult)
@@ -140,10 +144,17 @@ if (!copiesSource) {
 				!file.fileName.endsWith(CHECK_FILE) &&
 				checkProgram.getSourceFile(file.fileName)?.text !== file.text
 		);
-	if (edited)
-		unsupported(
-			`${relative(root, edited.fileName)} has a component whose check code has to go inside its own file, which needs @angular/compiler-cli 22.2 or newer`
+	if (edited) {
+		/* The program is built and analysed and nothing in it has been
+		 * replaced, so what ngc would do next is done here, with the
+		 * project's TypeScript: the same result, with no work done twice. */
+		explain(
+			`${relative(root, edited.fileName)} has a component whose check code has to go inside its own file, which needs @angular/compiler-cli 22.2 or newer: type-checking with the project's TypeScript, as ngc does`
 		);
+		const diagnostics = defaultGatherDiagnostics(program);
+		lap('ngcMs');
+		finish(diagnostics, { checkedBy: 'typescript' });
+	}
 }
 const mirrorOf = (fileName) => join(outDir, relative(parse(fileName).root, fileName));
 rmSync(outDir, { force: true, recursive: true });

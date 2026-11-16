@@ -104,7 +104,7 @@ if (ngc === null || !existsSync(ngc)) {
 	console.error('angular-check: @angular/compiler-cli is not installed in this project, so it was NOT type-checked.');
 	process.exit(3);
 }
-console.error('angular-check: checking with ngc instead.');
+if (process.env.ANGULAR_CHECK_EXPLAIN) console.error('angular-check: checking with ngc instead.');
 const fallback = Bun.spawnSync([runtime, ngc, '-p', configPath, '--noEmit'], {
 	cwd: root,
 	stderr: 'inherit',

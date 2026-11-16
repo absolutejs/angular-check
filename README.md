@@ -1,7 +1,8 @@
 # angular-check
 
 Type-check Angular projects with **Bun's native TypeScript checker** doing the type-checking.
-`angular-check` reports what `ngc` reports, in less than half the time.
+`angular-check` reports what `ngc` reports. On Angular 22.2 and newer it does so in about half the
+time or less; on older versions it is never different, and faster only for some projects.
 
 ```sh
 bunx @absolutejs/angular-check -p tsconfig.json
@@ -42,39 +43,58 @@ doesn't parse, `angular-check` exits with code 3 and says the project was not ty
 
 ## Which versions
 
-- **`@angular/compiler-cli` 22.2 and newer:** everything.
-- **21:** everything, unless a component's check code has to go inside the component's own file
-  (a generic component whose type bound can't be named from another file). From 22.2 the compiler
-  can copy that component's source into the check file; before it, the compiler edits the file in
-  memory, which a checker reading the disk can't see.
+- **`@angular/compiler-cli` 22.2 and newer:** the fast path, for every project.
+- **Older (tested on 21.2 and 22.0):** the fast path, unless a component's check code has to go inside
+  the component's own file (a generic component whose type bound can't be named from another file).
+  From 22.2 the compiler can copy that component's source into the check file. Before it, the
+  compiler edits the file in memory, which a checker reading the disk can't see, so such a project is
+  type-checked with its own TypeScript, as `ngc` does it: the same output, in about the same time.
 
-A project it can't check itself is checked by `ngc`, and it says so: slower, never different.
+`ANGULAR_CHECK_EXPLAIN=1` says which path a project took and why.
 
 ## How it's tested
 
-`bench/compare.sh` runs `ngc` and `angular-check` on the same project in a container with no
-network and compares everything each printed, and the exit code. `bench/plant.ts` plants errors of
-the kinds a template can have (a missing property, an unknown element, an unknown property, a
-missing pipe, a missing handler, `@if` and `@for` on missing names, bindings, type errors on values
-the template makes) and, with `--typescript`, errors in component classes, which `ngc` reports
-before it checks any template.
+The checker is the one thing `angular-check` lets you swap, so `bench/compare.sh` runs a project
+four ways in a container with no network, and each pair isolates one part:
 
-On PeerTube's web client (Angular 22.2, TypeScript 6.0, 337 components, strict templates):
+| Run | Checker | Must equal | Proves |
+|---|---|---|---|
+| `ngc` | project's TypeScript | the oracle | |
+| `angular-check` | project's `tsc` | `ngc` | the Angular handling |
+| `angular-check` | `tsc` 7.0.2 | | what TypeScript 7 changes, measured |
+| `angular-check` | `bun check` | the `tsc` 7 run | Bun's checker |
 
-| | `ngc` | `angular-check` |
-|---|---|---|
-| clean project | no errors | no errors |
-| 12 template errors planted | 13 errors | the same 13, identical output |
-| 2 class errors planted as well | 2 errors | the same 2, identical output |
-| time, clean project | about 21 s | about 9 s |
-| peak memory of the Angular step | 1.3 GB | 0.77 GB |
+Everything each run printed, and its exit code, is compared. `bench/sweep.sh` does that for every
+project in `bench/corpus.txt` three times: as it is, with errors planted in templates
+(`bench/plant.ts`: a missing property, an unknown element, an unknown property, a missing pipe, a
+missing handler, `@if` and `@for` on missing names, bindings, type errors on values the template
+makes), and with errors planted in component classes as well, which `ngc` reports before it checks
+any template.
 
-The memory row is the Node process only; `bun check` runs while it waits.
+| Project | Angular | Path | Handling = `ngc` | `bun check` = `tsc` 7 | TypeScript 7 changes |
+|---|---|---|---|---|---|
+| PeerTube web client | 22.2 | fast | ✓ ✓ ✓ | ✓ ✓ ✓ | 0 |
+| ng-zorro-antd library | 22.2 | fast | ✓ ✓ ✓ | ✓ ✓ ✓ | 1 |
+| ionic-conference-app | 22.0 | fast | ✓ ✓ ✓ | ✓ ✓ ✓ | 0 |
+| angular-realworld-example-app | 21.2 | fast | ✓ ✓ ✓ | ✓ ✓ ✓ | 0 |
+| Bitwarden web vault | 21.2 | project's TypeScript | ✓ ✓ ✓ | ✓ ✓ ✓ | 0 |
+
+The three marks are the three cases. The one TypeScript 7 change is an error `tsc` 7.0.2 reports in
+ng-zorro-antd's own code and TypeScript 6 doesn't.
+
+On PeerTube's web client (337 components, strict templates), a clean check takes `ngc` about 21 s and
+`angular-check` about 9 s on the same machine, and the Angular step peaks at 0.77 GB where `ngc`
+peaks at 1.3 GB. (`bun check` runs while that step waits; its memory is on top.) On Bitwarden's web
+vault, which takes the other path, the two take about the same time.
 
 ## Known limits
 
-- **TypeScript 7's semantics.** The type-checking is TypeScript 7's (`bun check`). Where that differs
-  from your project's TypeScript, you see what TypeScript 7 reports.
+- **TypeScript 7's semantics.** On the fast path the type-checking is TypeScript 7's (`bun check`).
+  Where that differs from your project's TypeScript, you see what TypeScript 7 reports. `ngc` checks
+  no template once a class has an error, so one error only TypeScript 7 reports hides the template
+  errors until it is fixed, as it would under `ngc` on TypeScript 7. Options whose default changed
+  between TypeScript versions (`strict` and its family, `types`) are given the meaning your project's
+  TypeScript gives them.
 - **Internal APIs.** Getting the check files out of Angular's compiler uses parts of it that Angular
   doesn't promise to keep. `angular-check` tests for each one and leaves the project to `ngc` when
   one is missing, so a new Angular release can make it slower until it's supported, never wrong.
