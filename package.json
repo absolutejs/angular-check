@@ -1,0 +1,34 @@
+{
+	"name": "@absolutejs/angular-check",
+	"version": "0.1.0",
+	"description": "Type-check Angular projects on Bun's native TypeScript checker: ngc's output, in less than half the time.",
+	"license": "MIT",
+	"type": "module",
+	"bin": {
+		"angular-check": "./src/cli.ts"
+	},
+	"files": [
+		"src",
+		"LICENSE",
+		"README.md"
+	],
+	"engines": {
+		"bun": ">=1.4.4"
+	},
+	"scripts": {
+		"test": "bun test",
+		"typecheck": "bun check"
+	},
+	"peerDependencies": {
+		"@angular/compiler-cli": ">=22.2.0 <23.0.0",
+		"typescript": ">=5.9.0"
+	},
+	"devDependencies": {
+		"@types/bun": "latest",
+		"typescript": "^5.9.3"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/absolutejs/angular-check.git"
+	}
+}
