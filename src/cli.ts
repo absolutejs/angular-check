@@ -1,8 +1,9 @@
 #!/usr/bin/env bun
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
+import { keyOf, readsOf, remember, remembered } from './cache';
 
 /*
  * angular-check: ngc's errors, with Bun's native TypeScript checker doing the
@@ -17,7 +18,7 @@ import { dirname, join, relative, resolve } from 'node:path';
  * The compiler is the project's own @angular/compiler-cli, and the errors
  * are mapped, filtered and printed by it, so the output is ngc's.
  *
- *   angular-check [-p tsconfig.json] [--threads=N] [--out-dir=.angular-check]
+ *   angular-check [-p tsconfig.json] [--threads=N] [--out-dir=.angular-check] [--no-cache]
  *
  * A project on a version of Angular's compiler this can't drive is checked
  * by ngc itself: slower, never different.
@@ -46,7 +47,7 @@ const threads = argument('--threads');
 /* Anything else is a compiler option for the checker (e.g. --skipLibCheck). */
 const OWN = new Set(['-p', '--project', '--threads', '--out-dir']);
 const passThrough = process.argv.slice(2).filter((value, index, all) => {
-	if (OWN.has(value.split('=')[0] ?? '')) return false;
+	if (OWN.has(value.split('=')[0] ?? '') || value === '--no-cache') return false;
 	const previous = all[index - 1];
 
 	return !(previous && OWN.has(previous) && !previous.includes('='));
@@ -75,18 +76,52 @@ const checkCommand = oracleTsc
  * ANGULAR_CHECK_RUNTIME=<path> names one. */
 const runtime = process.env.ANGULAR_CHECK_RUNTIME ?? Bun.which('node') ?? process.execPath;
 
+/* The last run's result, when nothing it read has changed (cache.ts):
+ * printed again, and nothing else is done. --no-cache (or
+ * ANGULAR_CHECK_CACHE=0) always runs; so does a run that is being measured. */
+const phasesFile = process.env.ANGULAR_CHECK_PHASES ?? null;
+const useCache = !process.argv.includes('--no-cache') && process.env.ANGULAR_CHECK_CACHE !== '0' && phasesFile === null;
+const cacheKey = keyOf({
+	argv: process.argv.slice(2).filter((value) => value !== '--no-cache'),
+	configPath,
+	outDir,
+	root,
+	runtime
+});
+if (useCache) {
+	const last = remembered(outDir, cacheKey);
+	if (last) {
+		process.stdout.write(last.stdout);
+		process.stderr.write(last.stderr);
+		process.exit(last.exitCode);
+	}
+}
+
 const scratch = mkdtempSync(join(tmpdir(), 'angular-check-'));
 const requestFile = join(scratch, 'request.json');
-writeFileSync(
-	requestFile,
-	JSON.stringify({ checkCommand, configPath, outDir, phasesFile: process.env.ANGULAR_CHECK_PHASES ?? null, root })
-);
+const readsFile = join(scratch, 'reads.json');
+writeFileSync(requestFile, JSON.stringify({ checkCommand, configPath, outDir, phasesFile, readsFile: useCache ? readsFile : null, root }));
+/* What the worker prints is kept, to be remembered, and passed on. */
 const worker = Bun.spawnSync([runtime, join(import.meta.dir, 'worker.mjs'), requestFile], {
 	cwd: root,
-	stderr: 'inherit',
+	stderr: 'pipe',
 	stdin: 'inherit',
-	stdout: 'inherit'
+	stdout: 'pipe'
 });
+const printed = { stderr: worker.stderr.toString(), stdout: worker.stdout.toString() };
+process.stdout.write(printed.stdout);
+process.stderr.write(printed.stderr);
+/* The worker's own exit codes for a finished check: 0, or 1 with errors. */
+const FINISHED = new Set([0, 1]);
+if (useCache && FINISHED.has(worker.exitCode ?? -1) && existsSync(readsFile)) {
+	try {
+		const reads = JSON.parse(readFileSync(readsFile, 'utf8')) as { configs: string[]; programFiles: string[]; skipped: string[]; trees: string[] };
+		// Without the program's files there is no knowing what was read.
+		if (reads.programFiles.length > 0) remember(outDir, cacheKey, readsOf({ ...reads, outDir, root }), worker.exitCode ?? 1, printed);
+	} catch {
+		// A result that can't be written is one that isn't remembered.
+	}
+}
 rmSync(scratch, { force: true, recursive: true });
 if (worker.exitCode !== UNSUPPORTED) process.exit(worker.exitCode ?? 3);
 

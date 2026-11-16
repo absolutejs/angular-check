@@ -35,9 +35,9 @@ docker run --rm --network none --memory "${MEMORY:-6g}" --user "$(id -u):$(id -g
 	}
 	same() { [ "$(cut -d" " -f1 /tmp/$1.meta)" = "$(cut -d" " -f1 /tmp/$2.meta)" ] && cmp -s /tmp/$1.txt /tmp/$2.txt; }
 	leg ngc node "$ngc" -p "$config" --noEmit
-	leg project-tsc env ANGULAR_CHECK_TSC="$project_tsc" bun /tool/src/cli.ts -p "$config" --out-dir=/tmp/ac-project
-	leg tsc7 env ANGULAR_CHECK_TSC=/tsc7/lib/tsc bun /tool/src/cli.ts -p "$config" --out-dir=/tmp/ac-tsc7
-	leg bun-check env ANGULAR_CHECK_PHASES=/tmp/phases.json bun /tool/src/cli.ts -p "$config" --out-dir=/tmp/ac-bun
+	leg project-tsc env ANGULAR_CHECK_TSC="$project_tsc" bun /tool/src/cli.ts -p "$config" --no-cache --out-dir=/tmp/ac-project
+	leg tsc7 env ANGULAR_CHECK_TSC=/tsc7/lib/tsc bun /tool/src/cli.ts -p "$config" --no-cache --out-dir=/tmp/ac-tsc7
+	leg bun-check env ANGULAR_CHECK_PHASES=/tmp/phases.json bun /tool/src/cli.ts -p "$config" --no-cache --out-dir=/tmp/ac-bun
 	cat /tmp/phases.json 2>/dev/null; echo
 	status=0
 	if same ngc project-tsc; then echo "handling: identical to ngc"; else echo "handling: DIFFERENT from ngc"; diff /tmp/ngc.txt /tmp/project-tsc.txt | head -30 | cut -c1-220; status=1; fi

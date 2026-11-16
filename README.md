@@ -16,6 +16,12 @@ installed (Angular's compiler needs much less memory there) and Bun when it isn'
 angular-check writes the check code it generates to `.angular-check/` in the project, so add
 `.angular-check/` to `.gitignore`, or put it in a folder you already ignore with `--out-dir=<dir>`.
 
+A run that would read exactly what the last one read prints that run's result again and does nothing
+else, in well under a tenth of a second. What a run read is every file of the program, every file
+under the folders your tsconfig includes (templates and styles among them), the tsconfig and the
+configs it extends, and your lockfile and `node_modules` folders; a file counts as changed when its
+size or modification time has. `--no-cache` (or `ANGULAR_CHECK_CACHE=0`) always runs the check.
+
 ## How it works
 
 `ngc` checks a project in one Node process. It builds the TypeScript program, analyses the

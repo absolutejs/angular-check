@@ -1,6 +1,6 @@
 {
 	"name": "@absolutejs/angular-check",
-	"version": "0.1.1",
+	"version": "0.1.2",
 	"description": "Type-check Angular projects on Bun's native TypeScript checker: ngc's output, faster on Angular 22.2 and newer.",
 	"license": "MIT",
 	"type": "module",

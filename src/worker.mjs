@@ -32,7 +32,7 @@ const UNSUPPORTED = 90;
 const NOT_CHECKED = 3;
 
 const request = JSON.parse(readFileSync(process.argv[2] ?? '', 'utf8'));
-const { checkCommand, configPath, outDir, phasesFile, root } = request;
+const { checkCommand, configPath, outDir, phasesFile, readsFile, root } = request;
 
 /* The project's own packages: the compiler that would have checked it, and
  * the TypeScript that compiler runs on. */
@@ -89,9 +89,43 @@ const formatHost = {
 	getNewLine: () =>
 		options.newLine === undefined ? ts.sys.newLine : options.newLine === ts.NewLineKind.LineFeed ? '\n' : '\r\n'
 };
+/* What this run read, for the caller to remember the result by (cache.ts):
+ * the program's files, the config and every config it extends, the folders
+ * the config includes and the ones its `exclude` names outright. */
+const writeReads = () => {
+	if (!readsFile) return;
+	const extended = new Map();
+	const parsed = ts.parseJsonConfigFileContent(
+		ts.readConfigFile(configPath, ts.sys.readFile).config ?? {},
+		ts.sys,
+		dirname(configPath),
+		undefined,
+		configPath,
+		undefined,
+		undefined,
+		extended
+	);
+	const excluded = Array.isArray(parsed.raw?.exclude) ? parsed.raw.exclude : [];
+	writeFileSync(
+		readsFile,
+		JSON.stringify({
+			configs: [configPath, ...extended.keys()],
+			programFiles: program
+				.getTsProgram()
+				.getSourceFiles()
+				.map((file) => file.fileName)
+				.filter((fileName) => !fileName.endsWith('.ngtypecheck.ts')),
+			skipped: excluded.flatMap((entry) =>
+				typeof entry === 'string' && !/[*?]/.test(entry) ? [resolve(dirname(configPath), entry)] : []
+			),
+			trees: Object.keys(parsed.wildcardDirectories ?? {})
+		})
+	);
+};
 const finish = (diagnostics, counts = {}) => {
 	// As ngc prints them: paths from the config's folder, in its line endings.
 	if (diagnostics.length > 0) console.error(formatDiagnostics(diagnostics, formatHost));
+	writeReads();
 	if (phasesFile)
 		writeFileSync(
 			phasesFile,
