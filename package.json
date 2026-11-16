@@ -5,7 +5,7 @@
 	"license": "MIT",
 	"type": "module",
 	"bin": {
-		"angular-check": "./src/cli.ts"
+		"angular-check": "src/cli.ts"
 	},
 	"files": [
 		"src",
