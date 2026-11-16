@@ -74,6 +74,39 @@ const options = { ...config.options, noEmit: true };
 const program = new NgtscProgram(config.rootNames, options, createCompilerHost({ options }));
 lap('createProgramMs');
 
+/* As ngc gathers its diagnostics (defaultGatherDiagnostics): the options'
+ * and the syntax errors first, and with one of those nothing is analysed or
+ * type-checked. Both are cheap and neither needs a checker, so they are
+ * asked for before anything is generated. */
+const isError = (diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error;
+const formatHost = {
+	getCanonicalFileName: (fileName) => fileName.replace(/\\/g, '/'),
+	getCurrentDirectory: () => options.basePath || ts.sys.getCurrentDirectory(),
+	getNewLine: () =>
+		options.newLine === undefined ? ts.sys.newLine : options.newLine === ts.NewLineKind.LineFeed ? '\n' : '\r\n'
+};
+const finish = (diagnostics, counts = {}) => {
+	// As ngc prints them: paths from the config's folder, in its line endings.
+	if (diagnostics.length > 0) console.error(formatDiagnostics(diagnostics, formatHost));
+	if (phasesFile)
+		writeFileSync(
+			phasesFile,
+			JSON.stringify({
+				...times,
+				...counts,
+				peakRssMB: Math.round(process.resourceUsage().maxRSS / 1024),
+				reported: diagnostics.length
+			})
+		);
+	process.exit(exitCodeFromResult(diagnostics));
+};
+if (
+	[...program.getTsOptionDiagnostics(), ...program.getNgOptionDiagnostics()].some(isError) ||
+	program.getTsSyntacticDiagnostics().some(isError)
+)
+	finish(defaultGatherDiagnostics(program));
+lap('syntaxMs');
+
 const { compiler } = program;
 if (!compiler?.programDriver || typeof compiler.ensureAnalyzed !== 'function')
 	unsupported("this @angular/compiler-cli's compiler isn't laid out as angular-check expects");
@@ -115,14 +148,69 @@ if (!copiesSource) {
 const mirrorOf = (fileName) => join(outDir, relative(parse(fileName).root, fileName));
 rmSync(outDir, { force: true, recursive: true });
 mkdirSync(outDir, { recursive: true });
+/* A check file that copies its component's source (see copiesSource) is the
+ * compiler's newest way of writing one, and what it writes there isn't valid
+ * TypeScript in two ways. The compiler never asks for the file's syntax or
+ * declaration errors, so it doesn't notice; a command-line checker checks no
+ * types in a program with a syntax error, and resolves a name declared twice
+ * its own way. Both are put right in what is written to disk.
+ *
+ * The imports the copied source's own check code needs are put in front,
+ * joined with nothing between (`from './a'import * as i1 from './b'`): each
+ * gets its semicolon, and where they went is kept, to turn a position in the
+ * file on disk back into one in the compiler's own text.
+ *
+ * The check blocks added after the copied source bring a second set of
+ * imports, numbered from i0 again, so `i1` is two modules in one file. The
+ * first set is used only before the second set's imports, so there it is
+ * renamed, to names of the same length, which moves nothing. */
+const JOINED_IMPORT = /(from (?:'[^'\n]*'|"[^"\n]*"))(?=import[ {*])/g;
+const LEADING_IMPORTS = /^(?:import \* as i\d+ from (?:'[^'\n]*'|"[^"\n]*");?)+/;
+const LATER_IMPORT = /^import \* as (i\d+) from /gm;
+const ALIAS_USE = /(?<![\w$.])i(\d+)(?=\.| from )/g;
+const SPARE_LETTERS = 'jklmnopqrstuvwxyz';
+const renamed = (text) => {
+	const leading = LEADING_IMPORTS.exec(text)?.[0];
+	if (leading === undefined) return text;
+	const first = new Set([...leading.matchAll(/import \* as (i\d+) from /g)].map((match) => match[1]));
+	LATER_IMPORT.lastIndex = leading.length;
+	const later = [...text.slice(leading.length).matchAll(LATER_IMPORT)];
+	const clashing = new Set(later.map((match) => match[1]).filter((name) => first.has(name)));
+	const [second] = later;
+	if (clashing.size === 0 || second?.index === undefined) return text;
+	// A letter no name in the file already starts an alias with.
+	const letter = [...SPARE_LETTERS].find((spare) => !new RegExp(`(?<![\\w$.])${spare}\\d+\\.`).test(text));
+	if (letter === undefined) return text;
+	const boundary = leading.length + second.index;
+
+	return (
+		text.slice(0, boundary).replace(ALIAS_USE, (match, digits) => (clashing.has(`i${digits}`) ? `${letter}${digits}` : match)) +
+		text.slice(boundary)
+	);
+};
+const separated = (original) => {
+	const text = renamed(original);
+	const inserted = [];
+	const written = text.replace(JOINED_IMPORT, (match, statement, offset) => {
+		inserted.push(offset + statement.length + inserted.length);
+
+		return `${statement};`;
+	});
+
+	return { inserted, written };
+};
 const checkFiles = new Map();
+/* Per check file (by its real name): what was written, and where characters were added. */
+const onDisk = new Map();
 for (const file of checkProgram.getSourceFiles()) {
 	// A component with no template to check has a check file with nothing in it.
 	if (!file.fileName.endsWith(CHECK_FILE) || file.statements.length === 0) continue;
 	const mirrored = mirrorOf(file.fileName);
+	const { inserted, written } = separated(file.text);
 	mkdirSync(dirname(mirrored), { recursive: true });
-	writeFileSync(mirrored, file.text);
+	writeFileSync(mirrored, written);
 	checkFiles.set(mirrored, file.fileName);
+	if (inserted.length > 0) onDisk.set(file.fileName, { inserted, written });
 }
 /* A check file resolves what it imports from its own folder: a package by
  * walking up through node_modules folders, and the nearest package.json says
@@ -168,10 +256,22 @@ const strictFamily = Object.fromEntries(
 /* With `types` unset, TypeScript before 6 includes every @types package it
  * can see, and from 6 on none. */
 const TYPES_DEFAULT_CHANGED_IN = 6;
-const automaticTypes =
-	options.types === undefined && Number(ts.versionMajorMinor.split('.')[0]) < TYPES_DEFAULT_CHANGED_IN
-		? { types: ts.getAutomaticTypeDirectiveNames(options, ts.sys) }
-		: {};
+const typeNames =
+	options.types ??
+	(Number(ts.versionMajorMinor.split('.')[0]) < TYPES_DEFAULT_CHANGED_IN ? ts.getAutomaticTypeDirectiveNames(options, ts.sys) : null);
+/* A `types` entry is looked up from the folder of the config that is being
+ * compiled, which is now the output folder. Each is resolved where the
+ * project's config is, and named by the file it resolves to. */
+const typesFrom = join(dirname(configPath), '__inferred type names__.ts');
+const types =
+	typeNames === null
+		? {}
+		: {
+				types: typeNames.map(
+					(name) =>
+						ts.resolveTypeReferenceDirective(name, typesFrom, options, ts.sys).resolvedTypeReferenceDirective?.resolvedFileName ?? name
+				)
+			};
 /* TypeScript 7 has removed baseUrl. Its documented replacement keeps the
  * meaning: `paths` targets are made absolute (they resolve from baseUrl), and
  * a bare import resolves under baseUrl through a catch-all alias, tried after
@@ -191,8 +291,16 @@ writeFileSync(
 	JSON.stringify({
 		compilerOptions: {
 			...strictFamily,
-			...automaticTypes,
+			...types,
 			...withoutBaseUrl,
+			/* ngc asks for the program's semantic errors and never for its
+			 * declaration errors. A command-line checker reports those too when
+			 * the options ask for declarations, so here they don't. */
+			composite: false,
+			declaration: false,
+			declarationMap: false,
+			emitDeclarationOnly: false,
+			incremental: false,
 			noEmit: true,
 			/* The files TypeScript 7 checks must sit under rootDir even when
 			 * nothing is emitted, and left unset it is this file's folder. The
@@ -276,9 +384,24 @@ for (const [fileName, list] of found) {
  * error in a check file by where it starts, and for one in the project's own
  * code the token there is what gets underlined. */
 const scanner = ts.createScanner(ts.ScriptTarget.Latest, true);
+const lineStartsOf = (text) => {
+	const starts = [0];
+	for (let index = text.indexOf('\n'); index !== -1; index = text.indexOf('\n', index + 1)) starts.push(index + 1);
+
+	return starts;
+};
+/* Where a line and column the checker printed is in the compiler's text. */
+const positionIn = (file, line, column) => {
+	const disk = onDisk.get(file.fileName);
+	if (!disk) return ts.getPositionOfLineAndCharacter(file, line - 1, column - 1);
+	disk.lineStarts ??= lineStartsOf(disk.written);
+	const offset = (disk.lineStarts[line - 1] ?? disk.written.length) + column - 1;
+
+	return offset - disk.inserted.filter((at) => at < offset).length;
+};
 const diagnosticsOf = (file) =>
 	(found.get(file.fileName) ?? []).map((item) => {
-		const start = ts.getPositionOfLineAndCharacter(file, item.line - 1, item.column - 1);
+		const start = positionIn(file, item.line, item.column);
 		scanner.setText(file.text, start);
 		scanner.scan();
 
@@ -297,23 +420,4 @@ userProgram.getSemanticDiagnostics = fromChecker(userProgram);
 
 const diagnostics = defaultGatherDiagnostics(program);
 lap('gatherMs');
-/* As ngc prints them: paths from the config's folder, in its line endings. */
-const formatHost = {
-	getCanonicalFileName: (fileName) => fileName.replace(/\\/g, '/'),
-	getCurrentDirectory: () => options.basePath || ts.sys.getCurrentDirectory(),
-	getNewLine: () =>
-		options.newLine === undefined ? ts.sys.newLine : options.newLine === ts.NewLineKind.LineFeed ? '\n' : '\r\n'
-};
-if (diagnostics.length > 0) console.error(formatDiagnostics(diagnostics, formatHost));
-if (phasesFile)
-	writeFileSync(
-		phasesFile,
-		JSON.stringify({
-			...times,
-			checkFiles: checkFiles.size,
-			checkerErrors: reported,
-			peakRssMB: Math.round(process.resourceUsage().maxRSS / 1024),
-			reported: diagnostics.length
-		})
-	);
-process.exit(exitCodeFromResult(diagnostics));
+finish(diagnostics, { checkFiles: checkFiles.size, checkerErrors: reported });

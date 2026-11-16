@@ -11,7 +11,7 @@ grep -v '^#' "$tool/bench/corpus.txt" | while IFS='|' read -r name _repository _
 	restore() { git -C "$clone" checkout -q -- . ; }
 	run() { # <case>
 		out=$("$tool/bench/compare.sh" "$app" "$tsconfig" "$clone" 2>&1)
-		echo "$name [$1] $(echo "$out" | grep -E '^(identical|DIFFERENT)' | head -1) | $(echo "$out" | grep -E '^(ngc|angular-check):' | tr '\n' ';')"
+		echo "$name [$1] $(echo "$out" | grep -E '^(handling|checker|typescript 7 changes):' | sed 's/ error lines differ.*//' | tr '\n' ';') $(echo "$out" | grep -E '^(ngc|bun-check):' | sed 's/, [0-9]* errors//' | tr '\n' ';')"
 		echo "$out" > "$dir/$name.$1.log"
 	}
 	restore; run clean

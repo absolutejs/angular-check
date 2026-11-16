@@ -53,11 +53,12 @@ const passThrough = process.argv.slice(2).filter((value, index, all) => {
 });
 
 /* ANGULAR_CHECK_TSC=<tsc> checks with that tsc instead of bun check: the same
- * generation and mapping, only the checker differs. The benchmark uses real
- * tsc 7 this way to show bun check agrees with it. */
+ * generation and mapping, only the checker differs. The benchmark uses the
+ * project's own tsc this way to show the Angular handling equals ngc's, and
+ * real tsc 7 to show bun check agrees with it. */
 const oracleTsc = process.env.ANGULAR_CHECK_TSC;
 const checkCommand = oracleTsc
-	? [oracleTsc, '--noEmit', '--pretty', 'false', ...passThrough]
+	? [...(oracleTsc.endsWith('.js') ? [Bun.which('node') ?? process.execPath] : []), oracleTsc, '--noEmit', '--pretty', 'false', ...passThrough]
 	: [
 			process.execPath,
 			'check',
