@@ -143,11 +143,56 @@ for (const fileName of checkFiles.values()) {
 		if (folder === parse(folder).root) break;
 	}
 }
+/* The checker is TypeScript 7 and the project's TypeScript may be older.
+ * Where the two differ in what an unset option means, the check config says
+ * what the project's TypeScript takes it to mean, so the program is checked
+ * under the options ngc checks it under. */
+const STRICT_FAMILY = [
+	'alwaysStrict',
+	'noImplicitAny',
+	'noImplicitThis',
+	'strictBindCallApply',
+	'strictBuiltinIteratorReturn',
+	'strictFunctionTypes',
+	'strictNullChecks',
+	'strictPropertyInitialization',
+	'useUnknownInCatchVariables'
+];
+const known = new Set(ts.optionDeclarations?.map((option) => option.name) ?? []);
+const strictFamily = Object.fromEntries(
+	STRICT_FAMILY.filter((name) => known.has(name) && typeof ts.getStrictOptionValue === 'function').map((name) => [
+		name,
+		Boolean(ts.getStrictOptionValue(options, name))
+	])
+);
+/* With `types` unset, TypeScript before 6 includes every @types package it
+ * can see, and from 6 on none. */
+const TYPES_DEFAULT_CHANGED_IN = 6;
+const automaticTypes =
+	options.types === undefined && Number(ts.versionMajorMinor.split('.')[0]) < TYPES_DEFAULT_CHANGED_IN
+		? { types: ts.getAutomaticTypeDirectiveNames(options, ts.sys) }
+		: {};
+/* TypeScript 7 has removed baseUrl. Its documented replacement keeps the
+ * meaning: `paths` targets are made absolute (they resolve from baseUrl), and
+ * a bare import resolves under baseUrl through a catch-all alias, tried after
+ * every other one. */
+const withoutBaseUrl = (() => {
+	if (!options.baseUrl) return {};
+	const pathsBase = options.pathsBasePath ?? options.baseUrl;
+	const paths = Object.fromEntries(
+		Object.entries(options.paths ?? {}).map(([alias, targets]) => [alias, targets.map((target) => resolve(pathsBase, target))])
+	);
+
+	return { baseUrl: null, paths: { ...paths, '*': [...(paths['*'] ?? []), join(options.baseUrl, '*')] } };
+})();
 const checkConfig = join(outDir, 'tsconfig.json');
 writeFileSync(
 	checkConfig,
 	JSON.stringify({
 		compilerOptions: {
+			...strictFamily,
+			...automaticTypes,
+			...withoutBaseUrl,
 			noEmit: true,
 			/* The files TypeScript 7 checks must sit under rootDir even when
 			 * nothing is emitted, and left unset it is this file's folder. The
@@ -200,8 +245,12 @@ for (const line of (checked.stdout ?? '').split('\n')) {
 }
 const reported = [...found.values()].reduce((sum, list) => sum + list.length, 0);
 /* A checker that failed and named no error didn't check (a crash, a bad
- * option). Never report that as clean. */
-if ((checked.status !== 0 && reported === 0) || checked.error || global.length > 0) {
+ * option), and neither did one whose error is in a file that isn't the
+ * program's (an option in the check config that it refuses): it stops there.
+ * Never report either as clean. */
+const isProgramFile = (fileName) => checkProgram.getSourceFile(fileName) !== undefined || userProgram.getSourceFile(fileName) !== undefined;
+const outside = [...found.keys()].filter((fileName) => !isProgramFile(fileName));
+if ((checked.status !== 0 && reported === 0) || checked.error || global.length > 0 || outside.length > 0) {
 	process.stderr.write(`${checked.stdout ?? ''}${checked.stderr ?? ''}`);
 	if (checked.error) console.error(String(checked.error));
 	console.error('angular-check: the checker failed (above), so the project was NOT type-checked.');
