@@ -97,16 +97,21 @@ lap('generateMs');
 /* The check files, each at its own absolute path under the output folder. */
 const checkProgram = compiler.getCurrentProgram();
 const userProgram = program.getTsProgram();
+const CHECK_FILE = '.ngtypecheck.ts';
 if (!copiesSource) {
 	const edited = userProgram
 		.getSourceFiles()
-		.find((file) => !file.isDeclarationFile && checkProgram.getSourceFile(file.fileName)?.text !== file.text);
+		.find(
+			(file) =>
+				!file.isDeclarationFile &&
+				!file.fileName.endsWith(CHECK_FILE) &&
+				checkProgram.getSourceFile(file.fileName)?.text !== file.text
+		);
 	if (edited)
 		unsupported(
 			`${relative(root, edited.fileName)} has a component whose check code has to go inside its own file, which needs @angular/compiler-cli 22.2 or newer`
 		);
 }
-const CHECK_FILE = '.ngtypecheck.ts';
 const mirrorOf = (fileName) => join(outDir, relative(parse(fileName).root, fileName));
 rmSync(outDir, { force: true, recursive: true });
 mkdirSync(outDir, { recursive: true });
@@ -145,8 +150,9 @@ writeFileSync(
 		compilerOptions: {
 			noEmit: true,
 			/* The files TypeScript 7 checks must sit under rootDir even when
-			 * nothing is emitted, and the check files are outside the project's. */
-			rootDir: null,
+			 * nothing is emitted, and left unset it is this file's folder. The
+			 * check files and the project's are only both under the root. */
+			rootDir: parse(outDir).root,
 			// A check file imports its component by a relative path.
 			rootDirs: [parse(outDir).root, outDir]
 		},
@@ -242,8 +248,14 @@ userProgram.getSemanticDiagnostics = fromChecker(userProgram);
 
 const diagnostics = defaultGatherDiagnostics(program);
 lap('gatherMs');
-// As ngc prints them.
-if (diagnostics.length > 0) console.error(formatDiagnostics(diagnostics));
+/* As ngc prints them: paths from the config's folder, in its line endings. */
+const formatHost = {
+	getCanonicalFileName: (fileName) => fileName.replace(/\\/g, '/'),
+	getCurrentDirectory: () => options.basePath || ts.sys.getCurrentDirectory(),
+	getNewLine: () =>
+		options.newLine === undefined ? ts.sys.newLine : options.newLine === ts.NewLineKind.LineFeed ? '\n' : '\r\n'
+};
+if (diagnostics.length > 0) console.error(formatDiagnostics(diagnostics, formatHost));
 if (phasesFile)
 	writeFileSync(
 		phasesFile,
